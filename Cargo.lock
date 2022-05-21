@@ -93,6 +93,7 @@ dependencies = [
  "foundry-utils",
  "futures",
  "hyper",
+ "once_cell",
  "parking_lot 0.12.0",
  "pretty_assertions",
  "serde",

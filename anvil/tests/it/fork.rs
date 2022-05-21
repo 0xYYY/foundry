@@ -9,19 +9,51 @@ use ethers::{
     signers::Signer,
     types::{Address, BlockNumber, Chain, TransactionRequest},
 };
-use std::sync::Arc;
+use once_cell::sync::Lazy;
+use std::{
+    iter::Cycle,
+    slice::Iter,
+    sync::{Arc, Mutex},
+};
 
 abigen!(Greeter, "test-data/greeter.json");
 
-const MAINNET_RPC_URL: &str =
-    "https://eth-mainnet.alchemyapi.io/v2/Lc7oIGYeL_QvInzI0Wiu_pOZZDEKBrdf";
+// const MAINNET_RPC_URL: &str =
+//     "https://eth-mainnet.alchemyapi.io/v2/Lc7oIGYeL_QvInzI0Wiu_pOZZDEKBrdf";
 
-const RINKEBY_RPC_URL: &str =
-    "https://eth-rinkeby.alchemyapi.io/v2/9VWGraLx0tMiSWx05WH-ywgSVmMxs66W";
+// const RINKEBY_RPC_URL: &str =
+//     "https://eth-rinkeby.alchemyapi.io/v2/9VWGraLx0tMiSWx05WH-ywgSVmMxs66W";
 
 const BLOCK_NUMBER: u64 = 14_608_400u64;
 
 const BLOCK_TIMESTAMP: u64 = 1_650_274_250u64;
+
+const ALCHEMY_MAINNET_KEYS: &[&str] = &["Lc7oIGYeL_QvInzI0Wiu_pOZZDEKBrdf"];
+const ALCHEMY_RINKEBY_KEYS: &[&str] = &["9VWGraLx0tMiSWx05WH-ywgSVmMxs66W"];
+
+static MAINNET_RPC_URL: Lazy<TestRpcUrl> =
+    Lazy::new(|| TestRpcUrl::new(ALCHEMY_MAINNET_KEYS, "mainnet"));
+static RINKEBY_RPC_URL: Lazy<TestRpcUrl> =
+    Lazy::new(|| TestRpcUrl::new(ALCHEMY_RINKEBY_KEYS, "rinkeby"));
+
+struct TestRpcUrl {
+    network: String,
+    keys: Mutex<Cycle<Iter<'static, &'static str>>>,
+}
+
+impl TestRpcUrl {
+    pub fn new(keys: &'static [&'static str], network: &str) -> Self {
+        Self { keys: Mutex::new(keys.iter().cycle()), network: network.to_owned() }
+    }
+
+    pub fn get(&self) -> String {
+        format!(
+            "https://eth-{}.alchemyapi.io/v2/{}",
+            self.network,
+            self.keys.lock().unwrap().next().unwrap()
+        )
+    }
+}
 
 /// Represents an anvil fork of an anvil node
 #[allow(unused)]
@@ -57,7 +89,7 @@ impl LocalFork {
 fn fork_config() -> NodeConfig {
     NodeConfig::test()
         .with_port(next_port())
-        .with_eth_rpc_url(Some(MAINNET_RPC_URL))
+        .with_eth_rpc_url(Some(MAINNET_RPC_URL.get()))
         .with_fork_block_number(Some(BLOCK_NUMBER))
         .silent()
 }
@@ -262,7 +294,7 @@ async fn can_deploy_greeter_on_rinkeby_fork() {
     let (_api, handle) = spawn(
         NodeConfig::test()
             .with_port(next_port())
-            .with_eth_rpc_url(Some(RINKEBY_RPC_URL))
+            .with_eth_rpc_url(Some(RINKEBY_RPC_URL.get()))
             .silent()
             .with_fork_block_number(Some(10074295u64)),
     )
