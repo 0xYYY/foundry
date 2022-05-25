@@ -2,6 +2,7 @@ on:
   push:
     branches:
       - master
+      - fix/it-test-git-config
   pull_request:
 
 name: test
@@ -75,6 +76,10 @@ jobs:
         with:
           path: "$HOME/.foundry/cache"
           key: rpc-cache-${{ hashFiles('cli/tests/it/integration.rs') }}
+      - name: Setup gitconfig
+        run: |
+          git config --global user.name test
+          git config --global user.email test@test.com
 
       - name: cargo test
         run: cargo test --locked --workspace --test '*'
