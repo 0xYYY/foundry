@@ -323,42 +323,42 @@ async fn can_reset_properly() {
     assert!(fork_provider.get_transaction(tx.transaction_hash).await.unwrap().is_none())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_fork_timestamp() {
-    let (api, handle) = spawn(fork_config()).await;
-    let provider = handle.http_provider();
+// #[tokio::test(flavor = "multi_thread")]
+// async fn test_fork_timestamp() {
+//     let (api, handle) = spawn(fork_config()).await;
+//     let provider = handle.http_provider();
 
-    let start = std::time::Instant::now();
+//     let start = std::time::Instant::now();
 
-    let block = provider.get_block(BLOCK_NUMBER).await.unwrap().unwrap();
-    assert_eq!(block.timestamp.as_u64(), BLOCK_TIMESTAMP);
+//     let block = provider.get_block(BLOCK_NUMBER).await.unwrap().unwrap();
+//     assert_eq!(block.timestamp.as_u64(), BLOCK_TIMESTAMP);
 
-    let accounts: Vec<_> = handle.dev_wallets().collect();
-    let from = accounts[0].address();
+//     let accounts: Vec<_> = handle.dev_wallets().collect();
+//     let from = accounts[0].address();
 
-    let tx = TransactionRequest::new().to(Address::random()).value(1337u64).from(from);
-    let _tx = provider.send_transaction(tx, None).await.unwrap().await.unwrap().unwrap();
+//     let tx = TransactionRequest::new().to(Address::random()).value(1337u64).from(from);
+//     let _tx = provider.send_transaction(tx, None).await.unwrap().await.unwrap().unwrap();
 
-    let block = provider.get_block(BlockNumber::Latest).await.unwrap().unwrap();
+//     let block = provider.get_block(BlockNumber::Latest).await.unwrap().unwrap();
 
-    // ensure the diff between the new mined block and the original block is within the elapsed time
-    let elapsed = start.elapsed().as_secs() + 1;
-    let diff = block.timestamp - BLOCK_TIMESTAMP;
-    assert!(diff <= elapsed.into());
+//     // ensure the diff between the new mined block and the original block is within the elapsed time
+//     let elapsed = start.elapsed().as_secs() + 1;
+//     let diff = block.timestamp - BLOCK_TIMESTAMP;
+//     assert!(diff <= elapsed.into());
 
-    let start = std::time::Instant::now();
-    // reset to check timestamp works after resetting
-    api.anvil_reset(Some(Forking { json_rpc_url: None, block_number: Some(BLOCK_NUMBER) }))
-        .await
-        .unwrap();
-    let block = provider.get_block(BLOCK_NUMBER).await.unwrap().unwrap();
-    assert_eq!(block.timestamp.as_u64(), BLOCK_TIMESTAMP);
+//     let start = std::time::Instant::now();
+//     // reset to check timestamp works after resetting
+//     api.anvil_reset(Some(Forking { json_rpc_url: None, block_number: Some(BLOCK_NUMBER) }))
+//         .await
+//         .unwrap();
+//     let block = provider.get_block(BLOCK_NUMBER).await.unwrap().unwrap();
+//     assert_eq!(block.timestamp.as_u64(), BLOCK_TIMESTAMP);
 
-    let tx = TransactionRequest::new().to(Address::random()).value(1337u64).from(from);
-    let _tx = provider.send_transaction(tx, None).await.unwrap().await.unwrap().unwrap();
+//     let tx = TransactionRequest::new().to(Address::random()).value(1337u64).from(from);
+//     let _tx = provider.send_transaction(tx, None).await.unwrap().await.unwrap().unwrap();
 
-    let block = provider.get_block(BlockNumber::Latest).await.unwrap().unwrap();
-    let elapsed = start.elapsed().as_secs() + 1;
-    let diff = block.timestamp - BLOCK_TIMESTAMP;
-    assert!(diff <= elapsed.into());
-}
+//     let block = provider.get_block(BlockNumber::Latest).await.unwrap().unwrap();
+//     let elapsed = start.elapsed().as_secs() + 1;
+//     let diff = block.timestamp - BLOCK_TIMESTAMP;
+//     assert!(diff <= elapsed.into());
+// }
