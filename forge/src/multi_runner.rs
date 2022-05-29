@@ -1015,6 +1015,7 @@ mod tests {
     fn test_cheats() {
         let mut runner = runner();
         let suite_result = runner.test(&Filter::new(".*", ".*", ".*cheats"), None, true).unwrap();
+        assert!(suite_result.len() > 0);
 
         for (_, SuiteResult { test_results, .. }) in suite_result {
             for (test_name, result) in test_results {
