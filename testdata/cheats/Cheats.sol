@@ -2,7 +2,6 @@
 pragma solidity >=0.8.0;
 
 interface Cheats {
-    a
     // Set block.timestamp (newTimestamp)
     function warp(uint256) external;
     // Set block.height (newHeight)
