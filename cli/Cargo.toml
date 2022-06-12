@@ -74,6 +74,8 @@ bytes = "1.1.0"
 strum = { version = "0.24", features = ["derive"] }
 thiserror = "1.0.30"
 indicatif = "0.17.0-rc.11"
+tera = "1.11.0"
+askama = "0.10.5"
 
 [dev-dependencies]
 anvil = { path = "../anvil" }

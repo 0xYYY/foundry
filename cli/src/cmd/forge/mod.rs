@@ -43,6 +43,7 @@ pub mod cache;
 pub mod config;
 pub mod create;
 pub mod debug;
+pub mod doc;
 pub mod flatten;
 pub mod fmt;
 pub mod fourbyte;

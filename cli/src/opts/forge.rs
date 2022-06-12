@@ -10,6 +10,7 @@ use crate::cmd::forge::{
     config,
     create::CreateArgs,
     debug::DebugArgs,
+    doc::DocArgs,
     flatten,
     fmt::FmtArgs,
     fourbyte::UploadSelectorsArgs,
@@ -70,6 +71,9 @@ pub enum Subcommands {
     #[clap(visible_alias = "d")]
     #[clap(about = "Debugs a single smart contract as a script.")]
     Debug(DebugArgs),
+
+    #[clap(about = "Generate NatSpec docs for smart contracts.")]
+    Doc(DocArgs),
 
     #[clap(
         visible_alias = "u",
