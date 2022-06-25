@@ -9,10 +9,10 @@ use crate::{
 };
 use askama::Template;
 use clap::{AppSettings, Parser};
-use ethers::abi::{Abi, Param, ParamType, StateMutability};
+use ethers::abi::{Abi, EventParam, Param, ParamType, StateMutability};
 use ethers::solc::artifacts::{
-    output_selection::OutputSelection, Contract, DevDoc, MethodDoc as SolcMethodDoc, UserDoc,
-    UserDocNotice,
+    output_selection::OutputSelection, Contract, DevDoc, EventDoc as SolcEventDoc,
+    MethodDoc as SolcMethodDoc, UserDoc, UserDocNotice,
 };
 use forge::executor::opts::EvmOpts;
 use foundry_common::evm::EvmArgs;
@@ -161,17 +161,17 @@ struct ContractDoc {
 impl ContractDoc {
     fn new(name: &String, contract: &Contract) -> Self {
         let abi = &contract.abi.as_ref().unwrap().abi;
-        let devdoc = &contract.devdoc;
-        let userdoc = &contract.userdoc;
+        let dev_doc = &contract.devdoc;
+        let user_doc = &contract.userdoc;
         Self {
             name: name.to_string(),
-            title: devdoc.title.clone(),
-            details: devdoc.details.clone(),
-            notice: userdoc.notice.clone(),
-            author: devdoc.author.clone(),
-            methods: Self::parse_methods(abi, &devdoc, &userdoc),
-            events: Self::parse_events(abi, &devdoc, &userdoc),
-            errors: Self::parse_errors(abi, &devdoc, &userdoc),
+            title: dev_doc.title.clone(),
+            details: dev_doc.details.clone(),
+            notice: user_doc.notice.clone(),
+            author: dev_doc.author.clone(),
+            methods: Self::parse_methods(abi, &dev_doc, &user_doc),
+            events: Self::parse_events(abi, &dev_doc, &user_doc),
+            errors: Self::parse_errors(abi, &dev_doc, &user_doc),
         }
     }
 
@@ -207,19 +207,57 @@ impl ContractDoc {
 
     fn parse_events(
         abi: &Abi,
-        devdoc: &DevDoc,
-        userdoc: &UserDoc,
+        dev_doc: &DevDoc,
+        user_doc: &UserDoc,
     ) -> BTreeMap<String, Vec<EventDoc>> {
-        let events: BTreeMap<String, Vec<EventDoc>> = BTreeMap::new();
+        let mut events: BTreeMap<String, Vec<EventDoc>> = BTreeMap::new();
+        for event in abi.events() {
+            let param_types: Vec<String> =
+                event.inputs.iter().map(|p| format!("{}", p.kind.clone())).collect();
+            let signature = format!("{}({})", event.name, param_types.join(","));
+            let event_dev_doc =
+                dev_doc.events.get(&signature).cloned().unwrap_or(SolcEventDoc::default());
+            let event_user_doc = user_doc.events.get(&signature);
+            let params = Self::parse_event_params(&event.inputs, &event_dev_doc.params);
+            events.entry(event.name.clone()).or_insert(Vec::new()).push(EventDoc {
+                name: event.name.clone(),
+                details: event_dev_doc.details.clone(),
+                notice: match event_user_doc {
+                    Some(UserDocNotice::Constructor(x)) => Some(x.clone()),
+                    Some(UserDocNotice::Notice { notice: x }) => Some(x.clone()),
+                    None => None,
+                },
+                params,
+            })
+        }
         events
     }
 
     fn parse_errors(
         abi: &Abi,
-        devdoc: &DevDoc,
-        userdoc: &UserDoc,
+        dev_doc: &DevDoc,
+        user_doc: &UserDoc,
     ) -> BTreeMap<String, Vec<ErrorDoc>> {
-        let errors: BTreeMap<String, Vec<ErrorDoc>> = BTreeMap::new();
+        let mut errors: BTreeMap<String, Vec<ErrorDoc>> = BTreeMap::new();
+        for error in abi.errors() {
+            let param_types: Vec<String> =
+                error.inputs.iter().map(|p| format!("{}", p.kind.clone())).collect();
+            let signature = format!("{}({})", error.name, param_types.join(","));
+            let error_dev_docs = dev_doc.errors.get(&signature).cloned().unwrap_or(Vec::new());
+            let error_user_docs = user_doc.errors.get(&signature).cloned().unwrap_or(Vec::new());
+            for i in 0..error_dev_docs.len() {
+                let params = Self::parse_params(&error.inputs, &error_dev_docs[i].params);
+                errors.entry(error.name.clone()).or_insert(Vec::new()).push(ErrorDoc {
+                    name: error.name.clone(),
+                    details: error_dev_docs[i].details.clone(),
+                    notice: Some(match &error_user_docs[i] {
+                        UserDocNotice::Constructor(x) => x.clone(),
+                        UserDocNotice::Notice { notice: x } => x.clone(),
+                    }),
+                    params,
+                })
+            }
+        }
         errors
     }
 
@@ -231,6 +269,22 @@ impl ContractDoc {
                 kind: p.kind.clone(),
                 internal_type: p.internal_type.clone(),
                 indexed: None,
+                doc: param_docs.get(&p.name.clone()).cloned().unwrap_or(String::from("-")),
+            })
+            .collect()
+    }
+
+    fn parse_event_params(
+        params: &Vec<EventParam>,
+        param_docs: &BTreeMap<String, String>,
+    ) -> Vec<ParamDoc> {
+        params
+            .iter()
+            .map(|p| ParamDoc {
+                name: if p.name.is_empty() { String::from("-") } else { p.name.clone() },
+                kind: p.kind.clone(),
+                internal_type: None,
+                indexed: Some(p.indexed),
                 doc: param_docs.get(&p.name.clone()).cloned().unwrap_or(String::from("-")),
             })
             .collect()
@@ -277,12 +331,28 @@ struct EventDoc {
     params: Vec<ParamDoc>,
 }
 
+impl fmt::Display for EventDoc {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let params =
+            self.params.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(", ");
+        write!(f, "{}({})", self.name, params)
+    }
+}
+
 #[derive(Debug)]
 struct ErrorDoc {
     name: String,
     details: Option<String>,
     notice: Option<String>,
     params: Vec<ParamDoc>,
+}
+
+impl fmt::Display for ErrorDoc {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let params =
+            self.params.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(", ");
+        write!(f, "{}({})", self.name, params)
+    }
 }
 
 #[derive(Debug)]
@@ -297,7 +367,7 @@ struct ParamDoc {
 
 impl fmt::Display for ParamDoc {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.name.is_empty() {
+        if self.name == "-" {
             write!(f, "{}", self.kind)
         } else {
             write!(f, "{} {}", self.kind, self.name)
@@ -350,8 +420,8 @@ impl Cmd for DocArgs {
         //     //         .iter()
         //     //         .map(|(name, contract)| Contract {
         //     //             name: name.to_string(),
-        //     //             userdoc: contract[0].clone().contract.userdoc,
-        //     //             devdoc: contract[0].clone().contract.devdoc,
+        //     //             user_doc: contract[0].clone().contract.user_doc,
+        //     //             dev_doc: contract[0].clone().contract.dev_doc,
         //     //             abi: contract[0].clone().contract.abi.unwrap().abi,
         //     //         })
         //     //         .collect(),
@@ -370,8 +440,8 @@ impl Cmd for DocArgs {
         //         for (name, contract) in contracts {
         //             println!("{}", name);
         //             println!("{:?}", contract[0].clone().contract.abi.unwrap().abi);
-        //             println!("{:?}", contract[0].clone().contract.devdoc);
-        //             println!("{:?}", contract[0].clone().contract.userdoc);
+        //             println!("{:?}", contract[0].clone().contract.dev_doc);
+        //             println!("{:?}", contract[0].clone().contract.user_doc);
         //         }
         //     });
         let output = output.output();
