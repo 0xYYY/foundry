@@ -10,16 +10,17 @@ use crate::{
     utils::FoundryPathExt,
 };
 use clap::{AppSettings, Parser};
-use ethers::solc::FileFilter;
+use ethers::solc::{utils::RuntimeOrHandle, FileFilter};
 use forge::{
     decode::decode_console_logs,
-    executor::opts::EvmOpts,
+    executor::{inspector::CheatsConfig, opts::EvmOpts},
     gas_report::GasReport,
+    result::{SuiteResult, TestKind, TestResult},
     trace::{
         identifier::{EtherscanIdentifier, LocalTraceIdentifier},
         CallTraceDecoderBuilder, TraceKind,
     },
-    MultiContractRunner, MultiContractRunnerBuilder, SuiteResult, TestFilter, TestKind,
+    MultiContractRunner, MultiContractRunnerBuilder, TestFilter,
 };
 use foundry_common::evm::EvmArgs;
 use foundry_config::{figment::Figment, Config};
@@ -333,7 +334,7 @@ pub struct Test {
     /// The signature of the solidity test
     pub signature: String,
     /// Result of the executed solidity test
-    pub result: forge::TestResult,
+    pub result: TestResult,
 }
 
 impl Test {
@@ -366,17 +367,17 @@ impl TestOutcome {
     }
 
     /// Iterator over all succeeding tests and their names
-    pub fn successes(&self) -> impl Iterator<Item = (&String, &forge::TestResult)> {
+    pub fn successes(&self) -> impl Iterator<Item = (&String, &TestResult)> {
         self.tests().filter(|(_, t)| t.success)
     }
 
     /// Iterator over all failing tests and their names
-    pub fn failures(&self) -> impl Iterator<Item = (&String, &forge::TestResult)> {
+    pub fn failures(&self) -> impl Iterator<Item = (&String, &TestResult)> {
         self.tests().filter(|(_, t)| !t.success)
     }
 
     /// Iterator over all tests and their names
-    pub fn tests(&self) -> impl Iterator<Item = (&String, &forge::TestResult)> {
+    pub fn tests(&self) -> impl Iterator<Item = (&String, &TestResult)> {
         self.results.values().flat_map(|SuiteResult { test_results, .. }| test_results.iter())
     }
 
@@ -433,7 +434,7 @@ impl TestOutcome {
     }
 }
 
-fn short_test_result(name: &str, result: &forge::TestResult) {
+fn short_test_result(name: &str, result: &TestResult) {
     let status = if result.success {
         Paint::green("[PASS]".to_string())
     } else {
@@ -497,6 +498,7 @@ pub fn custom_run(args: TestArgs, include_fuzz_tests: bool) -> eyre::Result<Test
         .evm_spec(evm_spec)
         .sender(evm_opts.sender)
         .with_fork(utils::get_fork(&evm_opts, &config.rpc_storage_caching))
+        .with_cheats_config(CheatsConfig::new(&config, &evm_opts))
         .build(project.paths.root, output, evm_opts)?;
 
     if args.debug.is_some() {
@@ -674,6 +676,7 @@ fn test(
 
                     // Decode the traces
                     let mut decoded_traces = Vec::new();
+                    let rt = RuntimeOrHandle::new();
                     for (kind, trace) in &mut result.traces {
                         decoder.identify(trace, &local_identifier);
                         decoder.identify(trace, &etherscan_identifier);
@@ -695,7 +698,7 @@ fn test(
                         // We decode the trace if we either need to build a gas report or we need
                         // to print it
                         if should_include || gas_reporting {
-                            decoder.decode(trace);
+                            rt.block_on(decoder.decode(trace));
                         }
 
                         if should_include {
@@ -728,6 +731,7 @@ fn test(
         // reattach the thread
         let _ = handle.join();
 
+        trace!(target: "forge::test", "received {} results", results.len());
         Ok(TestOutcome::new(results, allow_failure))
     }
 }

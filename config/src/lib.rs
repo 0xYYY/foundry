@@ -21,6 +21,7 @@ use figment::{
     Error, Figment, Metadata, Profile, Provider,
 };
 use inflector::Inflector;
+use regex::Regex;
 use semver::Version;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
@@ -30,6 +31,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
 };
+use tracing::trace;
 
 // Macros useful for creating a figment.
 mod macros;
@@ -38,15 +40,20 @@ mod macros;
 pub mod utils;
 pub use crate::utils::*;
 
+mod rpc;
+pub use rpc::RpcEndpoints;
+
 pub mod cache;
 use cache::{Cache, ChainCache};
+
 mod chain;
 pub use chain::Chain;
 
+mod error;
+pub use error::SolidityErrorCode;
+
 // reexport so cli types can implement `figment::Provider` to easily merge compiler arguments
 pub use figment;
-use regex::Regex;
-use tracing::trace;
 
 /// Foundry configuration
 ///
@@ -252,6 +259,9 @@ pub struct Config {
     /// Disables storage caching entirely. This overrides any settings made in
     /// `rpc_storage_caching`
     pub no_storage_caching: bool,
+    /// Multiple rpc endpoints and their aliases
+    #[serde(default, skip_serializing_if = "RpcEndpoints::is_empty")]
+    pub rpc_endpoints: RpcEndpoints,
     /// Whether to include the metadata hash.
     ///
     /// The metadata hash is machine dependent. By default, this is set to [BytecodeHash::None] to allow for deterministic code, See: <https://docs.soliditylang.org/en/latest/metadata.html>
@@ -266,6 +276,11 @@ pub struct Config {
     /// included in solc's output selection, see also
     /// [OutputSelection](ethers_solc::artifacts::output_selection::OutputSelection)
     pub sparse_mode: bool,
+    /// Whether to emit additional build info files
+    ///
+    /// If set to `true`, `ethers-solc` will generate additional build info json files for every
+    /// new build, containing the `CompilerInput` and `CompilerOutput`
+    pub build_info: bool,
     /// The root path where the config detection started from, `Config::with_root`
     #[doc(hidden)]
     //  We're skipping serialization here, so it won't be included in the [`Config::to_string()`]
@@ -521,6 +536,7 @@ impl Config {
             .set_auto_detect(self.is_auto_detect())
             .set_offline(self.offline)
             .set_cached(cached)
+            .set_build_info(cached & self.build_info)
             .set_no_artifacts(no_artifacts)
             .build()?;
 
@@ -911,6 +927,10 @@ impl Config {
                 .replace("[model_checker]", &format!("[{}.model_checker]", self.profile));
         }
         s = s.replace("[rpc_storage_caching]", &format!("[{}.rpc_storage_caching]", self.profile));
+
+        if !self.rpc_endpoints.is_empty() {
+            s = s.replace("[rpc_endpoints]", &format!("[{}.rpc_endpoints]", self.profile));
+        }
 
         Ok(format!(
             r#"[{}]
@@ -1387,15 +1407,17 @@ impl Default for Config {
             libraries: vec![],
             ignored_error_codes: vec![
                 SolidityErrorCode::SpdxLicenseNotProvided,
-                SolidityErrorCode::CotractExceeds24576Bytes,
+                SolidityErrorCode::ContractExceeds24576Bytes,
             ],
-            __non_exhaustive: (),
             via_ir: false,
             rpc_storage_caching: Default::default(),
+            rpc_endpoints: Default::default(),
             no_storage_caching: false,
             bytecode_hash: BytecodeHash::Ipfs,
             revert_strings: None,
             sparse_mode: false,
+            build_info: false,
+            __non_exhaustive: (),
         }
     }
 }
@@ -1467,56 +1489,6 @@ impl<'de> Deserialize<'de> for GasLimit {
         };
 
         Ok(gas)
-    }
-}
-
-/// A non-exhaustive list of solidity error codes
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum SolidityErrorCode {
-    /// Warning that SPDX license identifier not provided in source file
-    SpdxLicenseNotProvided,
-    /// Warning that contract code size exceeds 24576 bytes (a limit introduced in Spurious
-    /// Dragon).
-    CotractExceeds24576Bytes,
-    /// All other error codes
-    Other(u64),
-}
-
-impl From<SolidityErrorCode> for u64 {
-    fn from(code: SolidityErrorCode) -> u64 {
-        match code {
-            SolidityErrorCode::SpdxLicenseNotProvided => 1878,
-            SolidityErrorCode::CotractExceeds24576Bytes => 5574,
-            SolidityErrorCode::Other(code) => code,
-        }
-    }
-}
-
-impl From<u64> for SolidityErrorCode {
-    fn from(code: u64) -> Self {
-        match code {
-            1878 => SolidityErrorCode::SpdxLicenseNotProvided,
-            5574 => SolidityErrorCode::CotractExceeds24576Bytes,
-            other => SolidityErrorCode::Other(other),
-        }
-    }
-}
-
-impl Serialize for SolidityErrorCode {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_u64((*self).into())
-    }
-}
-
-impl<'de> Deserialize<'de> for SolidityErrorCode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        u64::deserialize(deserializer).map(Into::into)
     }
 }
 
@@ -2039,6 +2011,7 @@ mod tests {
 
     use super::*;
 
+    use crate::rpc::RpcEndpoint;
     use std::{fs::File, io::Write};
     use tempfile::tempdir;
 
@@ -2402,6 +2375,7 @@ mod tests {
                 remappings = ["ds-test=lib/ds-test/"]
                 via_ir = true
                 rpc_storage_caching = { chains = [1, "optimism", 999999], endpoints = "all"}
+                rpc_endpoints = { optimism = "https://example.com/", mainnet = "${RPC_MAINNET}" }
                 bytecode_hash = "ipfs"
                 revert_strings = "strip"
                 allow_paths = ["allow", "paths"]
@@ -2430,6 +2404,10 @@ mod tests {
                     bytecode_hash: BytecodeHash::Ipfs,
                     revert_strings: Some(RevertStrings::Strip),
                     allow_paths: vec![PathBuf::from("allow"), PathBuf::from("paths")],
+                    rpc_endpoints: RpcEndpoints::new([
+                        ("optimism", RpcEndpoint::Url("https://example.com/".to_string())),
+                        ("mainnet", RpcEndpoint::Env("RPC_MAINNET".to_string()))
+                    ]),
                     ..Config::default()
                 }
             );
@@ -3089,12 +3067,9 @@ mod tests {
         fn fake_etherscan_cache(chain_path: &Path, address: &str, size_bytes: usize) {
             let metadata_path = chain_path.join("sources");
             let abi_path = chain_path.join("abi");
-            match fs::create_dir(metadata_path.as_path()) {
-                _ => {}
-            }
-            match fs::create_dir(abi_path.as_path()) {
-                _ => {}
-            }
+            let _ = fs::create_dir(metadata_path.as_path());
+            let _ = fs::create_dir(abi_path.as_path());
+
             let metadata_file_path = metadata_path.join(address);
             let mut metadata_file = File::create(metadata_file_path).unwrap();
             writeln!(metadata_file, "{}", vec![' '; size_bytes / 2 - 1].iter().collect::<String>())

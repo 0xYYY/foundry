@@ -2,8 +2,15 @@
 
 use crate::term;
 use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, *};
-use ethers::solc::{report::NoReporter, Artifact, FileFilter, Project, ProjectCompileOutput};
-use std::{collections::BTreeMap, fmt::Display, path::PathBuf};
+use ethers::{
+    prelude::Graph,
+    solc::{report::NoReporter, Artifact, FileFilter, Project, ProjectCompileOutput},
+};
+use std::{
+    collections::BTreeMap,
+    fmt::Display,
+    path::{Path, PathBuf},
+};
 
 /// Compiles the provided [`Project`], throws if there's any compiler error and logs whether
 /// compilation was successful or if there was a cache hit.
@@ -24,7 +31,8 @@ pub struct SizeReport {
 
 pub struct ContractInfo {
     pub size: usize,
-    pub is_test_contract: bool,
+    // A development contract is either a Script or a Test contract.
+    pub is_dev_contract: bool,
 }
 
 impl SizeReport {
@@ -32,7 +40,7 @@ impl SizeReport {
     pub fn max_size(&self) -> usize {
         let mut max_size = 0;
         for contract in self.contracts.values() {
-            if !contract.is_test_contract && contract.size > max_size {
+            if !contract.is_dev_contract && contract.size > max_size {
                 max_size = contract.size;
             }
         }
@@ -55,7 +63,7 @@ impl Display for SizeReport {
             Cell::new("Margin (kB)").add_attribute(Attribute::Bold).fg(Color::Blue),
         ]);
 
-        let contracts = self.contracts.iter().filter(|(_, c)| !c.is_test_contract && c.size > 0);
+        let contracts = self.contracts.iter().filter(|(_, c)| !c.is_dev_contract && c.size > 0);
         for (name, contract) in contracts {
             let margin = CONTRACT_SIZE_LIMIT as isize - contract.size as isize;
             let color = match contract.size {
@@ -126,16 +134,6 @@ impl ProjectCompiler {
         F: FnOnce(&Project) -> eyre::Result<ProjectCompileOutput>,
     {
         let ProjectCompiler { print_sizes, print_names } = self;
-        if !project.paths.sources.exists() {
-            eyre::bail!(
-                r#"no contracts to compile, contracts folder "{}" does not exist.
-Check the configured workspace settings:
-{}
-If you are in a subdirectory in a Git repository, try adding `--root .`"#,
-                project.paths.sources.display(),
-                project.paths
-            );
-        }
 
         let now = std::time::Instant::now();
         tracing::trace!(target : "forge::compile", "start compiling project");
@@ -181,13 +179,17 @@ If you are in a subdirectory in a Git repository, try adding `--root .`"#,
                             .map(|bytes| bytes.0.len())
                             .unwrap_or_default();
 
-                        let test_functions =
+                        let dev_functions =
                             contract.abi.as_ref().unwrap().abi.functions().into_iter().filter(
-                                |func| func.name.starts_with("test") || func.name.eq("IS_TEST"),
+                                |func| {
+                                    func.name.starts_with("test") ||
+                                        func.name.eq("IS_TEST") ||
+                                        func.name.eq("IS_SCRIPT")
+                                },
                             );
 
-                        let is_test_contract = test_functions.into_iter().count() > 0;
-                        size_report.contracts.insert(name, ContractInfo { size, is_test_contract });
+                        let is_dev_contract = dev_functions.into_iter().count() > 0;
+                        size_report.contracts.insert(name, ContractInfo { size, is_dev_contract });
                     }
                 }
 
@@ -207,17 +209,6 @@ If you are in a subdirectory in a Git repository, try adding `--root .`"#,
 /// compilation was successful or if there was a cache hit.
 /// Doesn't print anything to stdout, thus is "suppressed".
 pub fn suppress_compile(project: &Project) -> eyre::Result<ProjectCompileOutput> {
-    if !project.paths.sources.exists() {
-        eyre::bail!(
-            r#"no contracts to compile, contracts folder "{}" does not exist.
-Check the configured workspace settings:
-{}
-If you are in a subdirectory in a Git repository, try adding `--root .`"#,
-            project.paths.sources.display(),
-            project.paths
-        );
-    }
-
     let output = ethers::solc::report::with_scoped(
         &ethers::solc::report::Report::new(NoReporter::default()),
         || project.compile(),
@@ -231,12 +222,53 @@ If you are in a subdirectory in a Git repository, try adding `--root .`"#,
 }
 
 /// Compile a set of files not necessarily included in the `project`'s source dir
-pub fn compile_files(project: &Project, files: Vec<PathBuf>) -> eyre::Result<ProjectCompileOutput> {
-    let output = term::with_spinner_reporter(|| project.compile_files(files))?;
+///
+/// If `silent` no solc related output will be emitted to stdout
+pub fn compile_files(
+    project: &Project,
+    files: Vec<PathBuf>,
+    silent: bool,
+) -> eyre::Result<ProjectCompileOutput> {
+    let output = if silent {
+        ethers::solc::report::with_scoped(
+            &ethers::solc::report::Report::new(NoReporter::default()),
+            || project.compile_files(files),
+        )
+    } else {
+        term::with_spinner_reporter(|| project.compile_files(files))
+    }?;
 
     if output.has_compiler_errors() {
         eyre::bail!(output.to_string())
     }
     println!("{output}");
     Ok(output)
+}
+
+/// Compiles target file path.
+///
+/// If `silent` no solc related output will be emitted to stdout.
+///
+/// If `verify` and it's a standalone script, throw error. Only allowed for projects.
+pub fn compile_target(
+    target_path: &Path,
+    project: &Project,
+    silent: bool,
+    verify: bool,
+) -> eyre::Result<ProjectCompileOutput> {
+    let graph = Graph::resolve(&project.paths)?;
+
+    // Checking if it's a standalone script, or part of a project.
+    if graph.files().get(target_path).is_none() {
+        if verify {
+            eyre::bail!("You can only verify deployments from inside a project! Make sure it exists with `forge tree`.");
+        }
+        return compile_files(project, vec![target_path.to_path_buf()], silent)
+    }
+
+    if silent {
+        suppress_compile(project)
+    } else {
+        compile(project, false, false)
+    }
 }

@@ -1,4 +1,4 @@
-use crate::{ContractRunner, SuiteResult, TestFilter};
+use crate::{result::SuiteResult, ContractRunner, TestFilter};
 use ethers::{
     abi::Abi,
     prelude::{artifacts::CompactContractBytecode, ArtifactId, ArtifactOutput},
@@ -7,7 +7,8 @@ use ethers::{
 };
 use eyre::Result;
 use foundry_evm::executor::{
-    builder::Backend, opts::EvmOpts, DatabaseRef, Executor, ExecutorBuilder, Fork, SpecId,
+    builder::Backend, inspector::CheatsConfig, opts::EvmOpts, DatabaseRef, Executor,
+    ExecutorBuilder, Fork, SpecId,
 };
 use foundry_utils::PostLinkInput;
 use proptest::test_runner::TestRunner;
@@ -28,6 +29,10 @@ pub struct MultiContractRunnerBuilder {
     pub evm_spec: Option<SpecId>,
     /// The fork config
     pub fork: Option<Fork>,
+    /// Additional cheatcode inspector related settings derived from the `Config`
+    pub cheats_config: Option<CheatsConfig>,
+    /// Whether or not to collect coverage info
+    pub coverage: bool,
 }
 
 pub type DeployableContracts = BTreeMap<ArtifactId, (Abi, Bytes, Vec<Bytes>)>;
@@ -124,6 +129,8 @@ impl MultiContractRunnerBuilder {
             errors: Some(execution_info.2),
             source_paths,
             fork: self.fork,
+            cheats_config: self.cheats_config.unwrap_or_default(),
+            coverage: self.coverage,
         })
     }
 
@@ -156,6 +163,18 @@ impl MultiContractRunnerBuilder {
         self.fork = fork;
         self
     }
+
+    #[must_use]
+    pub fn with_cheats_config(mut self, cheats_config: CheatsConfig) -> Self {
+        self.cheats_config = Some(cheats_config);
+        self
+    }
+
+    #[must_use]
+    pub fn set_coverage(mut self, enable: bool) -> Self {
+        self.coverage = enable;
+        self
+    }
 }
 
 /// A multi contract runner receives a set of contracts deployed in an EVM instance and proceeds
@@ -180,6 +199,10 @@ pub struct MultiContractRunner {
     pub source_paths: BTreeMap<String, String>,
     /// The fork config
     pub fork: Option<Fork>,
+    /// Additional cheatcode inspector related settings derived from the `Config`
+    pub cheats_config: CheatsConfig,
+    /// Whether or not to collect coverage info
+    pub coverage: bool,
 }
 
 impl MultiContractRunner {
@@ -244,6 +267,8 @@ impl MultiContractRunner {
         stream_result: Option<Sender<(String, SuiteResult)>>,
         include_fuzz_tests: bool,
     ) -> Result<BTreeMap<String, SuiteResult>> {
+        tracing::info!(include_fuzz_tests= ?include_fuzz_tests, "running all tests");
+
         let runtime = RuntimeOrHandle::new();
         let env = runtime.block_on(self.evm_opts.evm_env());
 
@@ -259,26 +284,29 @@ impl MultiContractRunner {
             })
             .filter(|(_, (abi, _, _))| abi.functions().any(|func| filter.matches_test(&func.name)))
             .map(|(id, (abi, deploy_code, libs))| {
-                let mut builder = ExecutorBuilder::new()
-                    .with_cheatcodes(self.evm_opts.ffi)
+                let identifier = id.identifier();
+                tracing::trace!(contract= ?identifier, "start executing all tests in contract");
+
+                let executor = ExecutorBuilder::default()
+                    .with_cheatcodes(self.cheats_config.clone())
                     .with_config(env.clone())
                     .with_spec(self.evm_spec)
-                    .with_gas_limit(self.evm_opts.gas_limit());
+                    .with_gas_limit(self.evm_opts.gas_limit())
+                    .set_tracing(self.evm_opts.verbosity >= 3)
+                    .set_coverage(self.coverage)
+                    .build(db.clone());
 
-                if self.evm_opts.verbosity >= 3 {
-                    builder = builder.with_tracing();
-                }
-
-                let executor = builder.build(db.clone());
                 let result = self.run_tests(
-                    &id.identifier(),
+                    &identifier,
                     abi,
                     executor,
                     deploy_code.clone(),
                     libs,
                     (filter, include_fuzz_tests),
                 )?;
-                Ok((id.identifier(), result))
+
+                tracing::trace!(contract= ?identifier, "executed all tests in contract");
+                Ok((identifier, result))
             })
             .filter_map(Result::<_>::ok)
             .filter(|(_, results)| !results.is_empty())
@@ -289,6 +317,8 @@ impl MultiContractRunner {
                 (name, result)
             })
             .collect::<BTreeMap<_, _>>();
+
+        tracing::info!(num_tests= ?results.len(),"ran all tests");
         Ok(results)
     }
 
@@ -330,17 +360,23 @@ mod tests {
             filter::Filter, COMPILED, COMPILED_WITH_LIBS, EVM_OPTS, LIBS_PROJECT, PROJECT,
         },
     };
+    use foundry_config::Config;
     use foundry_evm::trace::TraceKind;
     use std::env;
 
     /// Builds a base runner
     fn base_runner() -> MultiContractRunnerBuilder {
-        MultiContractRunnerBuilder::default().sender(EVM_OPTS.sender)
+        MultiContractRunnerBuilder::default()
+            .sender(EVM_OPTS.sender)
+            .with_cheats_config(CheatsConfig::new(&Config::default(), &*EVM_OPTS))
     }
 
     /// Builds a non-tracing runner
     fn runner() -> MultiContractRunner {
-        base_runner().build(&(*PROJECT).paths.root, (*COMPILED).clone(), EVM_OPTS.clone()).unwrap()
+        base_runner()
+            .with_cheats_config(CheatsConfig::new(&Config::with_root(PROJECT.root()), &*EVM_OPTS))
+            .build(&(*PROJECT).paths.root, (*COMPILED).clone(), EVM_OPTS.clone())
+            .unwrap()
     }
 
     /// Builds a tracing runner
@@ -1046,7 +1082,7 @@ Reason: `setEnv` failed to set an environment variable `{}={}`",
         );
 
         let suite_result = runner.test(&Filter::new(".*", ".*", ".*cheats"), None, true).unwrap();
-        assert!(suite_result.len() > 0);
+        assert!(!suite_result.is_empty());
         for (_, SuiteResult { test_results, .. }) in suite_result {
             for (test_name, result) in test_results {
                 let logs = decode_console_logs(&result.logs);

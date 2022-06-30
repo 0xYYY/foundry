@@ -10,6 +10,7 @@ use foundry_config::{figment::Figment, Config};
 use super::{sequence::ScriptSequence, *};
 
 impl ScriptArgs {
+    /// Executes the script
     pub async fn run_script(mut self) -> eyre::Result<()> {
         let figment: Figment = From::from(&self);
         let evm_opts = figment.extract::<EvmOpts>()?;
@@ -137,15 +138,15 @@ impl ScriptArgs {
                 }
 
                 if self.json {
-                    self.show_json(&script_config, &mut result)?;
+                    self.show_json(&script_config, &result)?;
                 } else {
-                    self.show_traces(&script_config, &decoder, &mut result)?;
+                    self.show_traces(&script_config, &decoder, &mut result).await?;
                 }
 
                 verify.known_contracts = unwrap_contracts(&highlevel_known_contracts, false);
                 self.handle_broadcastable_transactions(
                     &target,
-                    result.transactions,
+                    result,
                     libraries,
                     &mut decoder,
                     &script_config,

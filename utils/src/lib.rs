@@ -2,9 +2,9 @@
 use ethers_addressbook::contract;
 use ethers_core::{
     abi::{
-        self, parse_abi,
+        self,
         token::{LenientTokenizer, StrictTokenizer, Tokenizer},
-        Abi, AbiParser, Event, EventParam, Function, Param, ParamType, Token,
+        Abi, Event, EventParam, Function, HumanReadableParser, Param, ParamType, RawLog, Token,
     },
     types::*,
 };
@@ -27,6 +27,7 @@ use std::{
 
 pub mod rpc;
 pub mod selectors;
+pub use selectors::decode_selector;
 
 /// Very simple fuzzy matching of contract bytecode.
 ///
@@ -259,8 +260,7 @@ impl IntoFunction for String {
 
 impl<'a> IntoFunction for &'a str {
     fn into(self) -> Function {
-        AbiParser::default()
-            .parse_function(self)
+        HumanReadableParser::parse_function(self)
             .unwrap_or_else(|_| panic!("could not convert {self} to function"))
     }
 }
@@ -437,13 +437,35 @@ pub fn to_table(value: serde_json::Value) -> String {
 
 /// Given a function signature string, it tries to parse it as a `Function`
 pub fn get_func(sig: &str) -> Result<Function> {
-    // TODO: Make human readable ABI better / more minimal
-    let abi = parse_abi(&[sig])?;
-    // get the function
-    let (_, func) =
-        abi.functions.iter().next().ok_or_else(|| eyre::eyre!("function name not found"))?;
-    let func = func.get(0).ok_or_else(|| eyre::eyre!("functions array empty"))?;
-    Ok(func.clone())
+    Ok(HumanReadableParser::parse_function(sig)?)
+}
+
+/// Given an event signature string, it tries to parse it as a `Event`
+pub fn get_event(sig: &str) -> Result<Event> {
+    Ok(HumanReadableParser::parse_event(sig)?)
+}
+
+/// Given an event without indexed parameters and a rawlog, it tries to return the event with the
+/// proper indexed parameters. Otherwise, it returns the original event.
+pub fn get_indexed_event(mut event: Event, raw_log: &RawLog) -> Event {
+    if !event.anonymous && raw_log.topics.len() > 1 {
+        let indexed_params = raw_log.topics.len() - 1;
+        let num_inputs = event.inputs.len();
+        let num_address_params =
+            event.inputs.iter().filter(|p| p.kind == ParamType::Address).count();
+
+        event.inputs.iter_mut().enumerate().for_each(|(index, param)| {
+            if param.name.is_empty() {
+                param.name = format!("param{index}");
+            }
+            if num_inputs == indexed_params ||
+                (num_address_params == indexed_params && param.kind == ParamType::Address)
+            {
+                param.indexed = true;
+            }
+        })
+    }
+    event
 }
 
 // Given a function name, address, and args, tries to parse it as a `Function` by fetching the
@@ -561,11 +583,16 @@ pub fn abi_decode(sig: &str, calldata: &str, input: bool) -> Result<Vec<Token>> 
 /// Resolves an input to [`NameOrAddress`]. The input could also be a contract/token name supported
 /// by
 /// [`ethers-addressbook`](https://github.com/gakonst/ethers-rs/tree/master/ethers-addressbook).
-pub fn resolve_addr<T: Into<NameOrAddress>>(to: T, chain: Chain) -> eyre::Result<NameOrAddress> {
+pub fn resolve_addr<T: Into<NameOrAddress>>(
+    to: T,
+    chain: Option<Chain>,
+) -> eyre::Result<NameOrAddress> {
     Ok(match to.into() {
         NameOrAddress::Address(addr) => NameOrAddress::Address(addr),
         NameOrAddress::Name(contract_or_ens) => {
             if let Some(contract) = contract(&contract_or_ens) {
+                let chain = chain
+                    .ok_or_else(|| eyre::eyre!("resolving contract requires a known chain"))?;
                 NameOrAddress::Address(contract.address(chain).ok_or_else(|| {
                     eyre::eyre!(
                         "contract: {} not found in addressbook for network: {}",
@@ -1035,7 +1062,7 @@ mod tests {
 
         // DAI:mainnet exists in ethers-addressbook (0x6b175474e89094c44da98b954eedeac495271d0f)
         assert_eq!(
-            resolve_addr(NameOrAddress::Name("dai".to_string()), Chain::Mainnet).ok(),
+            resolve_addr(NameOrAddress::Name("dai".to_string()), Some(Chain::Mainnet)).ok(),
             Some(NameOrAddress::Address(
                 Address::from_str("0x6b175474e89094c44da98b954eedeac495271d0f").unwrap()
             ))
@@ -1043,25 +1070,30 @@ mod tests {
 
         // DAI:goerli exists in ethers-adddressbook (0x11fE4B6AE13d2a6055C8D9cF65c55bac32B5d844)
         assert_eq!(
-            resolve_addr(NameOrAddress::Name("dai".to_string()), Chain::Goerli).ok(),
+            resolve_addr(NameOrAddress::Name("dai".to_string()), Some(Chain::Goerli)).ok(),
             Some(NameOrAddress::Address(
                 Address::from_str("0x11fE4B6AE13d2a6055C8D9cF65c55bac32B5d844").unwrap()
             ))
         );
 
         // DAI:moonbean does not exist in addressbook
-        assert!(resolve_addr(NameOrAddress::Name("dai".to_string()), Chain::MoonbeamDev).is_err());
+        assert!(
+            resolve_addr(NameOrAddress::Name("dai".to_string()), Some(Chain::MoonbeamDev)).is_err()
+        );
 
         // If not present in addressbook, gets resolved to an ENS name.
         assert_eq!(
-            resolve_addr(NameOrAddress::Name("contractnotpresent".to_string()), Chain::Mainnet)
-                .ok(),
+            resolve_addr(
+                NameOrAddress::Name("contractnotpresent".to_string()),
+                Some(Chain::Mainnet)
+            )
+            .ok(),
             Some(NameOrAddress::Name("contractnotpresent".to_string())),
         );
 
         // Nothing to resolve for an address.
         assert_eq!(
-            resolve_addr(NameOrAddress::Address(Address::zero()), Chain::Mainnet).ok(),
+            resolve_addr(NameOrAddress::Address(Address::zero()), Some(Chain::Mainnet)).ok(),
             Some(NameOrAddress::Address(Address::zero())),
         );
     }
@@ -1095,5 +1127,56 @@ mod tests {
             .to_string(),
             abi_to_solidity(&contract_abi, "").unwrap()
         );
+    }
+
+    #[test]
+    fn test_indexed_only_address() {
+        let event = get_event("event Ev(address,uint256,address)").unwrap();
+
+        let param0 = H256::random();
+        let param1 = vec![3; 32];
+        let param2 = H256::random();
+        let log = RawLog { topics: vec![event.signature(), param0, param2], data: param1.clone() };
+        let event = get_indexed_event(event, &log);
+
+        assert!(event.inputs.len() == 3);
+
+        // Only the address fields get indexed since total_params > num_indexed_params
+        let parsed = event.parse_log(log).unwrap();
+
+        assert!(event.inputs.iter().filter(|param| param.indexed).count() == 2);
+        assert!(parsed.params[0].name == "param0");
+        assert!(parsed.params[0].value == Token::Address(param0.into()));
+        assert!(parsed.params[1].name == "param1");
+        assert!(parsed.params[1].value == Token::Uint(U256::from_big_endian(&param1)));
+        assert!(parsed.params[2].name == "param2");
+        assert!(parsed.params[2].value == Token::Address(param2.into()));
+    }
+
+    #[test]
+    fn test_indexed_all() {
+        let event = get_event("event Ev(address,uint256,address)").unwrap();
+
+        let param0 = H256::random();
+        let param1 = vec![3; 32];
+        let param2 = H256::random();
+        let log = RawLog {
+            topics: vec![event.signature(), param0, H256::from_slice(&param1), param2],
+            data: vec![],
+        };
+        let event = get_indexed_event(event, &log);
+
+        assert!(event.inputs.len() == 3);
+
+        // All parameters get indexed since num_indexed_params == total_params
+        assert!(event.inputs.iter().filter(|param| param.indexed).count() == 3);
+        let parsed = event.parse_log(log).unwrap();
+
+        assert!(parsed.params[0].name == "param0");
+        assert!(parsed.params[0].value == Token::Address(param0.into()));
+        assert!(parsed.params[1].name == "param1");
+        assert!(parsed.params[1].value == Token::Uint(U256::from_big_endian(&param1)));
+        assert!(parsed.params[2].name == "param2");
+        assert!(parsed.params[2].value == Token::Address(param2.into()));
     }
 }

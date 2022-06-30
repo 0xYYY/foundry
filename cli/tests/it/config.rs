@@ -1,4 +1,5 @@
 //! Contains various tests for checking forge commands related to config values
+use crate::forge_utils;
 use ethers::{
     prelude::artifacts::YulDetails,
     solc::artifacts::RevertStrings,
@@ -15,11 +16,6 @@ use foundry_config::{
     Config, OptimizerDetails, SolcReq,
 };
 use std::{fs, path::PathBuf, str::FromStr};
-
-// import forge utils as mod
-#[allow(unused)]
-#[path = "../../src/utils.rs"]
-mod forge_utils;
 
 // tests all config values that are in use
 forgetest!(can_extract_config_values, |prj: TestProject, mut cmd: TestCommand| {
@@ -95,6 +91,8 @@ forgetest!(can_extract_config_values, |prj: TestProject, mut cmd: TestCommand| {
         revert_strings: Some(RevertStrings::Strip),
         sparse_mode: true,
         allow_paths: vec![],
+        rpc_endpoints: Default::default(),
+        build_info: false,
         __non_exhaustive: (),
     };
     prj.write_config(input.clone());
@@ -389,7 +387,7 @@ forgetest_init!(can_detect_lib_foundry_toml, |prj: TestProject, mut cmd: TestCom
         ]
     );
     // create a new lib directly in the `lib` folder
-    let mut config = config.clone();
+    let mut config = config;
     config.remappings = vec![Remapping::from_str("nested/=lib/nested").unwrap().into()];
     let nested = prj.paths().libraries[0].join("nested-lib");
     pretty_err(&nested, fs::create_dir_all(&nested));
@@ -409,7 +407,7 @@ forgetest_init!(can_detect_lib_foundry_toml, |prj: TestProject, mut cmd: TestCom
     );
 
     // nest another lib under the already nested lib
-    let mut config = config.clone();
+    let mut config = config;
     config.remappings = vec![Remapping::from_str("nested-twice/=lib/nested-twice").unwrap().into()];
     let nested = nested.join("lib/another-lib");
     pretty_err(&nested, fs::create_dir_all(&nested));
@@ -457,7 +455,7 @@ forgetest_init!(
         let config = cmd.config();
 
         // create a new lib directly in the `lib` folder with conflicting remapping `forge-std/`
-        let mut config = config.clone();
+        let mut config = config;
         config.remappings =
             vec![Remapping::from_str("forge-std/=lib/forge-std/src/").unwrap().into()];
         let nested = prj.paths().libraries[0].join("dep1");
@@ -485,7 +483,7 @@ forgetest!(can_update_libs_section, |prj: TestProject, mut cmd: TestCommand| {
 
     // explicitly set gas_price
     let init = Config { libs: vec!["node_modules".into()], ..Default::default() };
-    prj.write_config(init.clone());
+    prj.write_config(init);
 
     cmd.args(["install", "foundry-rs/forge-std", "--no-commit"]);
     cmd.assert_non_empty_stdout();

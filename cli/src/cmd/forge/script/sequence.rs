@@ -1,29 +1,24 @@
-use crate::{
-    cmd::forge::{create::RETRY_VERIFY_ON_CREATE, verify},
-    opts::forge::ContractInfo,
-};
+use super::{NestedValue, ScriptResult, VerifyBundle};
+use crate::cmd::forge::{create::RETRY_VERIFY_ON_CREATE, verify};
 use cast::executor::inspector::DEFAULT_CREATE2_DEPLOYER;
-
 use ethers::{
     abi::{Abi, Address},
     prelude::{artifacts::Libraries, ArtifactId, NameOrAddress, TransactionReceipt, TxHash},
+    solc::info::ContractInfo,
     types::transaction::eip2718::TypedTransaction,
 };
 use eyre::ContextCompat;
 use forge::trace::CallTraceDecoder;
+use foundry_common::fs;
 use foundry_config::Config;
-
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     io::BufWriter,
     path::{Path, PathBuf},
-    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
-
-use super::{ScriptResult, VerifyBundle};
 
 /// Helper that saves the transactions sequence and its state on which transactions have been
 /// broadcasted
@@ -34,12 +29,14 @@ pub struct ScriptSequence {
     pub libraries: Vec<String>,
     pub pending: Vec<TxHash>,
     pub path: PathBuf,
+    pub returns: HashMap<String, NestedValue>,
     pub timestamp: u64,
 }
 
 impl ScriptSequence {
     pub fn new(
         transactions: VecDeque<TransactionWithMetadata>,
+        returns: HashMap<String, NestedValue>,
         sig: &str,
         target: &ArtifactId,
         config: &Config,
@@ -49,6 +46,7 @@ impl ScriptSequence {
 
         Ok(ScriptSequence {
             transactions,
+            returns,
             receipts: vec![],
             pending: vec![],
             path,
@@ -66,7 +64,7 @@ impl ScriptSequence {
         target: &ArtifactId,
         chain_id: u64,
     ) -> eyre::Result<Self> {
-        let file = std::fs::read_to_string(ScriptSequence::get_path(
+        let file = fs::read_to_string(ScriptSequence::get_path(
             &config.broadcast,
             sig,
             target,
@@ -80,10 +78,10 @@ impl ScriptSequence {
             self.timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let path = self.path.to_string_lossy();
             //../run-latest.json
-            serde_json::to_writer(BufWriter::new(std::fs::File::create(&self.path)?), &self)?;
+            serde_json::to_writer(BufWriter::new(fs::create_file(&self.path)?), &self)?;
             //../run-[timestamp].json
             serde_json::to_writer(
-                BufWriter::new(std::fs::File::create(
+                BufWriter::new(fs::create_file(
                     path.replace("latest.json", &format!("{}.json", self.timestamp)),
                 )?),
                 &self,
@@ -148,7 +146,7 @@ impl ScriptSequence {
         out.push(target_fname);
         out.push(format!("{chain_id}"));
 
-        std::fs::create_dir_all(&out)?;
+        fs::create_dir_all(&out)?;
 
         let filename = sig.split_once('(').wrap_err("Sig is invalid.")?.0.to_owned();
         out.push(format!("{filename}-latest.json"));
@@ -168,10 +166,7 @@ impl ScriptSequence {
                 let mut create2_offset = 0;
 
                 if tx.is_create2() {
-                    receipt.contract_address = Address::from_str(
-                        tx.contract_address.as_ref().expect("There should be a contract address."),
-                    )
-                    .ok();
+                    receipt.contract_address = tx.contract_address;
                     create2_offset = 32;
                 }
 
@@ -258,7 +253,7 @@ pub struct TransactionWithMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub contract_address: Option<String>,
+    pub contract_address: Option<Address>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -304,7 +299,7 @@ impl TransactionWithMetadata {
         }
 
         self.contract_name = contracts.get(&address).map(|(name, _)| name.clone());
-        self.contract_address = Some(format!("0x{:?}", address));
+        self.contract_address = Some(address);
     }
 
     fn set_call(
@@ -346,7 +341,7 @@ impl TransactionWithMetadata {
                             })?);
                     }
                 }
-                self.contract_address = Some(format!("0x{:?}", target));
+                self.contract_address = Some(target);
             }
         }
         Ok(())

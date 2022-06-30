@@ -1,6 +1,7 @@
 pub mod cmd;
 pub mod compile;
 
+mod handler;
 mod suggestions;
 mod term;
 mod utils;
@@ -14,14 +15,14 @@ use cast::InterfacePath;
 use clap::{IntoApp, Parser};
 use clap_complete::generate;
 use ethers::{
-    core::{
-        abi::AbiParser,
-        types::{BlockId, BlockNumber::Latest, H256},
-    },
+    abi::HumanReadableParser,
+    core::types::{BlockId, BlockNumber::Latest, H256},
     providers::{Middleware, Provider},
-    types::{Address, Chain, NameOrAddress, U256},
+    types::{Address, NameOrAddress, U256},
 };
 use eyre::WrapErr;
+use foundry_common::fs;
+use foundry_config::Chain;
 use foundry_utils::{
     format_tokens,
     selectors::{
@@ -43,7 +44,7 @@ use std::{
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    color_eyre::install()?;
+    handler::install()?;
     utils::subscriber();
     utils::enable_paint();
 
@@ -91,7 +92,7 @@ async fn main() -> eyre::Result<()> {
                     var.as_bytes().to_hex()
                 }
                 s if s.starts_with('/') => {
-                    let input = std::fs::read(s)?;
+                    let input = fs::read(s)?;
                     input.to_hex()
                 }
                 s => {
@@ -177,8 +178,11 @@ async fn main() -> eyre::Result<()> {
                 config.eth_rpc_url.unwrap_or_else(|| "http://localhost:8545".to_string()),
             )?;
 
-            let chain_id = Cast::new(&provider).chain_id().await?;
-            let chain = Chain::try_from(chain_id.as_u64()).unwrap_or(eth.chain);
+            let chain: Chain = if let Some(chain) = eth.chain {
+                chain.into()
+            } else {
+                provider.get_chainid().await?.into()
+            };
 
             let mut builder =
                 TxBuilder::new(&provider, config.sender, address, chain, false).await?;
@@ -204,8 +208,11 @@ async fn main() -> eyre::Result<()> {
                 config.eth_rpc_url.unwrap_or_else(|| "http://localhost:8545".to_string()),
             )?;
 
-            let chain_id = provider.get_chainid().await?;
-            let chain = Chain::try_from(chain_id.as_u64()).unwrap_or(eth.chain);
+            let chain: Chain = if let Some(chain) = eth.chain {
+                chain.into()
+            } else {
+                provider.get_chainid().await?.into()
+            };
 
             let mut builder =
                 TxBuilder::new(&provider, config.sender, address, chain, false).await?;
@@ -263,6 +270,7 @@ async fn main() -> eyre::Result<()> {
             args,
             gas,
             gas_price,
+            priority_gas_price,
             value,
             mut nonce,
             legacy,
@@ -275,11 +283,14 @@ async fn main() -> eyre::Result<()> {
                 &config.eth_rpc_url.unwrap_or_else(|| "http://localhost:8545".to_string()),
                 false,
             );
-            let chain_id = Cast::new(&provider).chain_id().await?;
-            let chain = Chain::try_from(chain_id.as_u64()).unwrap_or(eth.chain);
+            let chain: Chain = if let Some(chain) = eth.chain {
+                chain.into()
+            } else {
+                provider.get_chainid().await?.into()
+            };
             let sig = sig.unwrap_or_default();
 
-            if let Ok(Some(signer)) = eth.signer_with(chain_id, provider.clone()).await {
+            if let Ok(Some(signer)) = eth.signer_with(chain.into(), provider.clone()).await {
                 let from = match &signer {
                     WalletType::Ledger(leger) => leger.address(),
                     WalletType::Local(local) => local.address(),
@@ -299,6 +310,7 @@ async fn main() -> eyre::Result<()> {
                             (sig, args),
                             gas,
                             gas_price,
+                            priority_gas_price,
                             value,
                             nonce,
                             chain,
@@ -318,6 +330,7 @@ async fn main() -> eyre::Result<()> {
                             (sig, args),
                             gas,
                             gas_price,
+                            priority_gas_price,
                             value,
                             nonce,
                             chain,
@@ -337,6 +350,7 @@ async fn main() -> eyre::Result<()> {
                             (sig, args),
                             gas,
                             gas_price,
+                            priority_gas_price,
                             value,
                             nonce,
                             chain,
@@ -364,6 +378,7 @@ async fn main() -> eyre::Result<()> {
                     (sig, args),
                     gas,
                     gas_price,
+                    priority_gas_price,
                     value,
                     nonce,
                     chain,
@@ -401,8 +416,11 @@ async fn main() -> eyre::Result<()> {
                 config.eth_rpc_url.unwrap_or_else(|| "http://localhost:8545".to_string()),
             )?;
 
-            let chain_id = Cast::new(&provider).chain_id().await?;
-            let chain = Chain::try_from(chain_id.as_u64()).unwrap_or(eth.chain);
+            let chain: Chain = if let Some(chain) = eth.chain {
+                chain.into()
+            } else {
+                provider.get_chainid().await?.into()
+            };
 
             let from = eth.sender().await;
 
@@ -431,8 +449,8 @@ async fn main() -> eyre::Result<()> {
         Subcommands::AbiEncode { sig, args } => {
             println!("{}", SimpleCast::abi_encode(&sig, &args)?);
         }
-        Subcommands::Index { key_type, value_type, key, slot_number } => {
-            let encoded = SimpleCast::index(&key_type, &value_type, &key, &slot_number)?;
+        Subcommands::Index { key_type, key, slot_number } => {
+            let encoded = SimpleCast::index(&key_type, &key, &slot_number)?;
             println!("{encoded}");
         }
         Subcommands::FourByte { selector } => {
@@ -440,6 +458,7 @@ async fn main() -> eyre::Result<()> {
             sigs.iter().for_each(|sig| println!("{}", sig));
         }
         Subcommands::FourByteDecode { calldata } => {
+            let calldata = unwrap_or_stdin(calldata)?;
             let sigs = decode_calldata(&calldata).await?;
             sigs.iter().enumerate().for_each(|(i, sig)| println!("{}) \"{}\"", i + 1, sig));
 
@@ -559,8 +578,8 @@ async fn main() -> eyre::Result<()> {
             // print or write to file
             match output_location {
                 Some(loc) => {
-                    std::fs::create_dir_all(&loc.parent().unwrap())?;
-                    std::fs::write(&loc, res)?;
+                    fs::create_dir_all(&loc.parent().unwrap())?;
+                    fs::write(&loc, res)?;
                     println!("Saved interface at {}", loc.display());
                 }
                 None => {
@@ -658,7 +677,7 @@ async fn main() -> eyre::Result<()> {
             }
         }
         Subcommands::Sig { sig } => {
-            let selector = AbiParser::default().parse_function(&sig).unwrap().short_signature();
+            let selector = HumanReadableParser::parse_function(&sig)?.short_signature();
             println!("0x{}", hex::encode(selector));
         }
         Subcommands::FindBlock(cmd) => cmd.run()?.await?,
@@ -667,6 +686,7 @@ async fn main() -> eyre::Result<()> {
             generate(shell, &mut Opts::command(), "cast", &mut std::io::stdout())
         }
         Subcommands::Run(cmd) => cmd.run()?,
+        Subcommands::Rpc(cmd) => cmd.run()?.await?,
     };
     Ok(())
 }
@@ -695,6 +715,7 @@ async fn cast_send<M: Middleware, F: Into<NameOrAddress>, T: Into<NameOrAddress>
     args: (String, Vec<String>),
     gas: Option<U256>,
     gas_price: Option<U256>,
+    priority_gas_price: Option<U256>,
     value: Option<U256>,
     nonce: Option<U256>,
     chain: Chain,
@@ -717,6 +738,7 @@ where
         .await?
         .gas(gas)
         .gas_price(gas_price)
+        .priority_gas_price(priority_gas_price)
         .value(value)
         .nonce(nonce);
     let builder_output = builder.build();

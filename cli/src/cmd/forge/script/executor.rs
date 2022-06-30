@@ -1,17 +1,19 @@
-use crate::{cmd::needs_setup, utils};
-
+use crate::{
+    cmd::{
+        forge::script::{sequence::TransactionWithMetadata, *},
+        needs_setup,
+    },
+    utils,
+};
 use ethers::{
     solc::artifacts::CompactContractBytecode,
     types::{transaction::eip2718::TypedTransaction, Address, U256},
 };
 use forge::{
-    executor::{builder::Backend, ExecutorBuilder},
+    executor::{builder::Backend, inspector::CheatsConfig, ExecutorBuilder},
     trace::CallTraceDecoder,
 };
-
 use std::collections::VecDeque;
-
-use crate::cmd::forge::script::{sequence::TransactionWithMetadata, *};
 
 impl ScriptArgs {
     /// Locally deploys and executes the contract method that will collect all broadcastable
@@ -75,7 +77,6 @@ impl ScriptArgs {
     ) -> eyre::Result<VecDeque<TransactionWithMetadata>> {
         let mut runner = self.prepare_runner(script_config, script_config.evm_opts.sender).await;
         let mut failed = false;
-        let mut sum_gas = 0;
 
         if script_config.evm_opts.verbosity > 3 {
             println!("==========================");
@@ -85,19 +86,20 @@ impl ScriptArgs {
         let address_to_abi: BTreeMap<Address, (String, &Abi)> = decoder
             .contracts
             .iter()
-            .filter_map(|(addr, contract_name)| {
+            .filter_map(|(addr, contract_id)| {
+                let contract_name = utils::get_contract_name(contract_id);
                 if let Some((_, (abi, _))) =
-                    contracts.iter().find(|(artifact, _)| artifact.name == *contract_name)
+                    contracts.iter().find(|(artifact, _)| artifact.name == contract_name)
                 {
-                    return Some((*addr, (contract_name.clone(), abi)))
+                    return Some((*addr, (contract_name.to_string(), abi)))
                 }
                 None
             })
             .collect();
 
-        let final_txs: VecDeque<TransactionWithMetadata> = transactions
-            .into_iter()
-            .map(|tx| match tx {
+        let mut final_txs = VecDeque::new();
+        for tx in transactions {
+            match tx {
                 TypedTransaction::Legacy(mut tx) => {
                     let mut result = runner
                         .simulate(
@@ -114,37 +116,41 @@ impl ScriptArgs {
                     // might be off
                     tx.gas = Some(U256::from(result.gas * 13 / 10));
 
-                    sum_gas += result.gas;
                     if !result.success {
                         failed = true;
                     }
 
                     if script_config.evm_opts.verbosity > 3 {
                         for (_kind, trace) in &mut result.traces {
-                            decoder.decode(trace);
+                            decoder.decode(trace).await;
                             println!("{}", trace);
                         }
                     }
 
-                    TransactionWithMetadata::new(tx.into(), &result, &address_to_abi, decoder)
-                        .unwrap()
+                    final_txs.push_back(TransactionWithMetadata::new(
+                        tx.into(),
+                        &result,
+                        &address_to_abi,
+                        decoder,
+                    )?);
                 }
                 _ => unreachable!(),
-            })
-            .collect();
+            }
+        }
 
         if failed {
-            Err(eyre::Report::msg("Simulated execution failed"))
+            eyre::bail!("Simulated execution failed")
         } else {
             Ok(final_txs)
         }
     }
 
+    /// Creates the Runner that drives script execution
     async fn prepare_runner(
         &self,
         script_config: &ScriptConfig,
         sender: Address,
-    ) -> Runner<Backend> {
+    ) -> ScriptRunner<Backend> {
         let env = script_config.evm_opts.evm_env().await;
 
         // the db backend that serves all the data
@@ -154,20 +160,15 @@ impl ScriptArgs {
         )
         .await;
 
-        let mut builder = ExecutorBuilder::new()
-            .with_cheatcodes(script_config.evm_opts.ffi)
+        let executor = ExecutorBuilder::default()
+            .with_cheatcodes(CheatsConfig::new(&script_config.config, &script_config.evm_opts))
             .with_config(env)
             .with_spec(crate::utils::evm_spec(&script_config.config.evm_version))
-            .with_gas_limit(script_config.evm_opts.gas_limit());
+            .with_gas_limit(script_config.evm_opts.gas_limit())
+            .set_tracing(script_config.evm_opts.verbosity >= 3 || self.debug)
+            .set_debugger(self.debug)
+            .build(db);
 
-        if script_config.evm_opts.verbosity >= 3 {
-            builder = builder.with_tracing();
-        }
-
-        if self.debug {
-            builder = builder.with_tracing().with_debugger();
-        }
-
-        Runner::new(builder.build(db), script_config.evm_opts.initial_balance, sender)
+        ScriptRunner::new(executor, script_config.evm_opts.initial_balance, sender)
     }
 }

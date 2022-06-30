@@ -1,7 +1,9 @@
 //! Verify contract source on etherscan
 
-use super::build::{CoreBuildArgs, ProjectPathsArgs};
-use crate::{cmd::RetryArgs, opts::forge::ContractInfo};
+use crate::cmd::{
+    forge::build::{CoreBuildArgs, ProjectPathsArgs},
+    RetryArgs,
+};
 use clap::Parser;
 use ethers::{
     abi::Address,
@@ -14,6 +16,7 @@ use ethers::{
     solc::{
         artifacts::{BytecodeHash, Source},
         cache::CacheEntry,
+        info::ContractInfo,
         AggregatedCompilerOutput, CompilerInput, Project, Solc,
     },
 };
@@ -195,6 +198,7 @@ impl VerifyArgs {
             via_ir: false,
             revert_strings: None,
             silent: false,
+            build_info: false,
         };
 
         let project = build_args.project()?;
