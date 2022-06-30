@@ -222,6 +222,7 @@ dependencies = [
  "serde",
  "syn",
  "toml",
+]
 
 [[package]]
 name = "async-priority-channel"

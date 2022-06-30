@@ -319,7 +319,7 @@ impl fmt::Display for MethodDoc {
         } else {
             String::new()
         };
-        write!(f, "{}({}) external{}{}", self.name, params, state_mutability, returns)
+        write!(f, "function {}({}) external{}{}", self.name, params, state_mutability, returns)
     }
 }
 
@@ -335,7 +335,7 @@ impl fmt::Display for EventDoc {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let params =
             self.params.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(", ");
-        write!(f, "{}({})", self.name, params)
+        write!(f, "event {}({})", self.name, params)
     }
 }
 
@@ -351,7 +351,7 @@ impl fmt::Display for ErrorDoc {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let params =
             self.params.iter().map(|x| format!("{}", x)).collect::<Vec<String>>().join(", ");
-        write!(f, "{}({})", self.name, params)
+        write!(f, "error {}({})", self.name, params)
     }
 }
 
@@ -446,7 +446,7 @@ impl Cmd for DocArgs {
         //     });
         let output = output.output();
         let mut grouped_contracts: BTreeMap<String, Vec<(String, &Contract)>> = BTreeMap::new();
-        for (file, name, contract) in output.contracts_with_files_iter() {
+        for (file, name, contract) in output.contracts.contracts_with_files() {
             if !src_dir_glob.compile_matcher().is_match(file) {
                 continue;
             }
@@ -472,11 +472,42 @@ impl Cmd for DocArgs {
         doc_dir.push(src_dir);
         doc_dir.pop();
         doc_dir.push("docs");
+        doc_dir.push("src");
         let doc_dir = doc_dir.as_path();
         if !doc_dir.exists() {
-            fs::create_dir(doc_dir)?;
+            fs::create_dir_all(doc_dir)?;
         }
+        let mut summary = String::new();
+        let mut current_base = String::new();
         for document in documents {
+            let file_path = Path::new(&document.name);
+            let file_name = file_path.file_name().unwrap();
+            let n = file_path.ancestors().count() - 2;
+            let mut ancestors = file_path.ancestors();
+            ancestors.next();
+            if let Some(base) = ancestors.next() {
+                let base = base.to_str().unwrap();
+                if !current_base.starts_with(base) {
+                    current_base = base.to_string();
+                    let base_path = Path::new(&current_base);
+                    let base_name = base_path.file_name().unwrap();
+                    let n = base_path.ancestors().count() - 2;
+                    summary += format!(
+                        "{}- [{}]({}.md)\n",
+                        " ".repeat(n * 4),
+                        base_name.to_str().unwrap(),
+                        base_path.to_str().unwrap()
+                    )
+                    .as_str();
+                }
+            }
+            summary += format!(
+                "{}- [{}]({}.md)\n",
+                " ".repeat(n * 4),
+                file_name.to_str().unwrap(),
+                file_path.to_str().unwrap()
+            )
+            .as_str();
             let document_string = document.render()?;
             let mut document_path =
                 Path::new(&format!("{}", doc_dir.to_str().unwrap())).to_path_buf();
@@ -486,6 +517,9 @@ impl Cmd for DocArgs {
             }
             fs::write(document_path, document_string).expect("Unable to write file");
         }
+        let mut summary_path = Path::new(&format!("{}", doc_dir.to_str().unwrap())).to_path_buf();
+        summary_path.push("SUMMARY.md");
+        fs::write(summary_path, summary).expect("Unable to write file");
         Ok(())
     }
 }
