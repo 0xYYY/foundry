@@ -18,12 +18,13 @@ use forge::executor::opts::EvmOpts;
 use foundry_common::evm::EvmArgs;
 use foundry_config::{figment::Figment, Config};
 use globset::Glob;
+use itertools::Itertools;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::{
     fmt,
     fmt::Debug,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 // use tera::{Context, Tera};
@@ -468,6 +469,7 @@ impl Cmd for DocArgs {
             .map(|(file, contracts)| FileDoc::new(file.to_string(), contracts))
             .collect();
 
+        // write documents to file mirroring the structure of the src directory
         let mut doc_dir = PathBuf::new();
         doc_dir.push(src_dir);
         doc_dir.pop();
@@ -477,37 +479,7 @@ impl Cmd for DocArgs {
         if !doc_dir.exists() {
             fs::create_dir_all(doc_dir)?;
         }
-        let mut summary = String::new();
-        let mut current_base = String::new();
         for document in documents {
-            let file_path = Path::new(&document.name);
-            let file_name = file_path.file_name().unwrap();
-            let n = file_path.ancestors().count() - 2;
-            let mut ancestors = file_path.ancestors();
-            ancestors.next();
-            if let Some(base) = ancestors.next() {
-                let base = base.to_str().unwrap();
-                if !current_base.starts_with(base) {
-                    current_base = base.to_string();
-                    let base_path = Path::new(&current_base);
-                    let base_name = base_path.file_name().unwrap();
-                    let n = base_path.ancestors().count() - 2;
-                    summary += format!(
-                        "{}- [{}]({}.md)\n",
-                        " ".repeat(n * 4),
-                        base_name.to_str().unwrap(),
-                        base_path.to_str().unwrap()
-                    )
-                    .as_str();
-                }
-            }
-            summary += format!(
-                "{}- [{}]({}.md)\n",
-                " ".repeat(n * 4),
-                file_name.to_str().unwrap(),
-                file_path.to_str().unwrap()
-            )
-            .as_str();
             let document_string = document.render()?;
             let mut document_path =
                 Path::new(&format!("{}", doc_dir.to_str().unwrap())).to_path_buf();
@@ -515,11 +487,62 @@ impl Cmd for DocArgs {
             if !document_path.parent().unwrap().exists() {
                 fs::create_dir(document_path.parent().unwrap())?;
             }
-            fs::write(document_path, document_string).expect("Unable to write file");
+            fs::write(document_path, document_string)?;
         }
+
+        // populate summary files for mdbook
+        let doc_paths = generate_mdbook_summary(doc_dir, doc_dir, 0)?;
+        let summary = doc_paths
+            .iter()
+            .map(|p| {
+                let name = p.split("/").last().unwrap().strip_suffix(".md").unwrap();
+                let n = (p.split("/").count() - 1) * 4;
+                format!("{}- [{}]({})", " ".repeat(n), name, p.split("/").join("/"))
+            })
+            .join("\n");
         let mut summary_path = Path::new(&format!("{}", doc_dir.to_str().unwrap())).to_path_buf();
-        summary_path.push("SUMMARY.md");
-        fs::write(summary_path, summary).expect("Unable to write file");
+        summary_path.push(format!("SUMMARY.md"));
+        fs::write(summary_path, summary)?;
+
         Ok(())
     }
+}
+
+fn generate_mdbook_summary(doc_dir: &Path, dir: &Path, depth: usize) -> eyre::Result<Vec<String>> {
+    let mut all_paths = vec![];
+    let mut paths = fs::read_dir(dir)?
+        .map(|res| res.map(|e| e.path()))
+        .collect::<Result<Vec<_>, io::Error>>()?;
+    paths.sort();
+    for path in paths {
+        println!("{:?}", path);
+        let path = path.as_path();
+        let mut rel_path = path.strip_prefix(doc_dir)?.to_str().unwrap().to_string();
+        if !rel_path.ends_with(".md") {
+            rel_path += ".md";
+        }
+        all_paths.push(rel_path);
+
+        // summary += &format!("- [{}]({})\n", path.file_stem().unwrap().to_str().unwrap(), rel_path);
+        if path.is_dir() {
+            let mut dir_paths = generate_mdbook_summary(doc_dir, path, depth + 1)?;
+            let mut dir_summary = dir_paths
+                .iter()
+                .map(|p| {
+                    let name = p.split("/").last().unwrap().strip_suffix(".md").unwrap();
+                    let n = (p.split("/").count() - (depth + 2)) * 4;
+                    format!("{}- [{}]({})", " ".repeat(n), name, p.split("/").skip(depth).join("/"))
+                })
+                .join("\n");
+            let dir_summary_path = format!("{}.md", path.to_str().unwrap());
+            fs::write(dir_summary_path, dir_summary)?;
+            all_paths.append(&mut dir_paths);
+            //     dir_summary = dir_summary
+            //         .split("\n")
+            //         .map(|s| format!("    {s}"))
+            //         .fold(String::new(), |a, b| a + &b + "\n");
+            //     summary += &dir_summary;
+        }
+    }
+    Ok(all_paths)
 }
